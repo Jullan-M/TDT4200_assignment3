@@ -171,7 +171,7 @@ int main(int argc, char **argv) {
 
     bmpImage *image;
     bmpImageChannel *imageChannel;
-    int local_YSZ, local_XSZ;
+    int local_XSZ, im_YSZ;
 
     // The image will only be opened in root rank.
     // It will be distributed to the processes after this if nest using MPI_Scatter().
@@ -211,69 +211,87 @@ int main(int argc, char **argv) {
             freeBmpImageChannel(imageChannel);
             goto error_exit;
         }
-        local_YSZ = imageChannel->height / comm_sz;
+        im_YSZ = imageChannel->height;
         local_XSZ = imageChannel->width;
 
     }
 
-    int local_n = local_XSZ * local_YSZ / comm_sz;
-    MPI_Bcast(&local_YSZ, 1, MPI_INT, 0, comm);
+    MPI_Bcast(&im_YSZ, 1, MPI_INT, 0, comm);
     MPI_Bcast(&local_XSZ, 1, MPI_INT, 0, comm);
-    MPI_Bcast(&local_n, 1, MPI_INT, 0, comm);
+
+    int* data_counts = malloc(sizeof(int) * comm_sz);
+    int* displs = malloc(sizeof(int) * comm_sz);
+
+
+    for (int i = 0; i < comm_sz; i++) {
+        data_counts[i] = (im_YSZ / comm_sz)  * local_XSZ;
+        displs[i] = data_counts[i] * i;
+
+        // Last rank gets the remainder rows if they don't divide evenly.
+        if (i == comm_sz - 1 && i != 0) {
+            data_counts[i] += (im_YSZ % comm_sz) * local_XSZ;
+            displs[i] += data_counts[i] - data_counts[i - 1];
+        }
+    }
+
+    int local_YSZ = data_counts[my_rank] / local_XSZ;
+    int local_n = data_counts[my_rank];
 
 
     bmpImageChannel* local_imChannel = newBmpImageChannel(local_XSZ, local_YSZ);
     bmpImageChannel* local_procImChannel = newBmpImageChannel(local_XSZ, local_YSZ);
 
-    MPI_Scatter(imageChannel->rawdata,
-                local_n,
-                MPI_UNSIGNED_CHAR,
-                local_imChannel->rawdata,
-                local_n,
-                MPI_UNSIGNED_CHAR,
-                0,
-                comm
+    MPI_Scatterv(imageChannel->rawdata,
+            data_counts,
+            displs,
+            MPI_UNSIGNED_CHAR,
+            local_imChannel->rawdata,
+            local_n,
+            MPI_UNSIGNED_CHAR,
+            0,
+            comm
     );
 
     for (unsigned int i = 0; i < local_YSZ; i++) {
-        local_imChannel->data[i] = &(imageChannel->rawdata[i * local_XSZ]);
+        local_imChannel->data[i] = &(local_imChannel->rawdata[i * local_XSZ]);
     }
 
-    printf("Height:%d\n", local_imChannel->height);
-    printf("Width:%d\n", local_imChannel->width);
-
     //Here we do the actual computation!
-    printf("Here I go... - Proc%d\n", my_rank);
+    printf("Proc %d: Here I go...\n", my_rank);
     for (unsigned int i = 0; i < iterations; i ++) {
         applyKernel(local_procImChannel->data,
                     local_imChannel->data,
-                    local_imChannel->width,
-                    local_imChannel->height,
-                    (int *)laplacian1Kernel, 3, laplacian1KernelFactor
-                //               (int *)laplacian2Kernel, 3, laplacian2KernelFactor
-                //               (int *)laplacian3Kernel, 3, laplacian3KernelFactor
-                //               (int *)gaussianKernel, 5, gaussianKernelFactor
+                    local_XSZ,
+                    local_YSZ,
+//                    (int *)laplacian1Kernel, 3, laplacian1KernelFactor
+//                    (int *)laplacian2Kernel, 3, laplacian2KernelFactor
+//                    (int *)laplacian3Kernel, 3, laplacian3KernelFactor
+                    (int *)gaussianKernel, 5, gaussianKernelFactor
         );
+        swapImageChannel(&local_procImChannel, &local_imChannel);
     }
     printf("... And I'm done! - Proc%d\n", my_rank);
 
-    freeBmpImageChannel(local_imChannel);
+    freeBmpImageChannel(local_procImChannel);
 
-    local_procImChannel->rawdata = &(local_procImChannel->data[0][0]);
+    local_imChannel->rawdata = &(local_imChannel->data[0][0]);
 
-    MPI_Gather(local_procImChannel->rawdata,
+    MPI_Gatherv(local_imChannel->rawdata,
                local_n,
                MPI_UNSIGNED_CHAR,
                imageChannel->rawdata,
-               local_n,
+               data_counts,
+               displs,
                MPI_UNSIGNED_CHAR,
                0,
                comm
     );
 
+    freeBmpImageChannel(local_imChannel);
+
     if (my_rank == 0) {
         for (unsigned int i = 0; i < imageChannel->height; i++) {
-            imageChannel->data[i] = &(imageChannel->rawdata[i * imageChannel->height]);
+            imageChannel->data[i] = &(imageChannel->rawdata[i * imageChannel->width]);
         }
         // Map our single color image back to a normal BMP image with 3 color channels
         // mapEqual puts the color value on all three channels the same way
