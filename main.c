@@ -49,9 +49,43 @@ int const gaussianKernel[] = { 1,  4,  6,  4, 1,
 
 float const gaussianKernelFactor = (float) 1.0 / 256.0;
 
+int const NW[] =    {   0,
+                    0,      1,
+                        1};
+
+int const NE[] =    {   0,
+                    1,      0,
+                        1};
+
+int const SW[] =    {   1,
+                    0,      1,
+                        0};
+
+int const SE[] =    {   1,
+                    1,      0,
+                        0};
+
+int const N[] =     {   0   ,
+                    1,      1,
+                        1};
+
+int const E[] =     {   1   ,
+                    1,      0,
+                        1};
+
+int const S[] =     {   1   ,
+                    1,      1,
+                        0};
+
+int const W[] =     {   1   ,
+                    0,      1,
+                        1};
+
+int const C[] =     {   1   ,
+                    1,      1,
+                        1};
 
 // Helper function to swap bmpImageChannel pointers
-
 void swapImageChannel(bmpImageChannel **one, bmpImageChannel **two) {
   bmpImageChannel *helper = *two;
   *two = *one;
@@ -84,34 +118,6 @@ void applyKernel(unsigned char **out, unsigned char **in, unsigned int width, un
         }
     }
 }
-
-void applyKernelPrivately(unsigned char **out, unsigned char **in, unsigned int width, unsigned int height, int *kernel, unsigned int kernelDim, float kernelFactor) {
-    unsigned int const kernelCenter = (kernelDim / 2);
-    unsigned int const kernelRadi = (kernelDim - 1) / 2;
-    for (unsigned int y = kernelRadi; y < height - kernelRadi; y++) {
-        for (unsigned int x = 0; x < width; x++) {
-            int aggregate = 0;
-            for (unsigned int ky = 0; ky < kernelDim; ky++) {
-                int nky = kernelDim - 1 - ky;
-                for (unsigned int kx = 0; kx < kernelDim; kx++) {
-                    int nkx = kernelDim - 1 - kx;
-
-                    int yy = y + (ky - kernelCenter);
-                    int xx = x + (kx - kernelCenter);
-                    if (xx >= 0 && xx < (int) width && yy >=0 && yy < (int) height)
-                        aggregate += in[yy][xx] * kernel[nky * kernelDim + nkx];
-                }
-            }
-            aggregate *= kernelFactor;
-            if (aggregate > 0) {
-                out[y][x] = (aggregate > 255) ? 255 : aggregate;
-            } else {
-                out[y][x] = 0;
-            }
-        }
-    }
-}
-
 
 void help(char const *exec, char const opt, char const *optarg) {
     FILE *out = stdout;
@@ -198,7 +204,11 @@ int main(int argc, char **argv) {
 
     bmpImage *image;
     bmpImageChannel *imageChannel;
-    int local_XSZ, im_YSZ;
+    int *send_counts, *recv_counts,  *recv_displs, *send_displs;
+    int local_XSZ, local_n, im_YSZ;
+
+    int kernelDim;
+    int kernelRadi;
 
     // The image will only be opened in root rank.
     // It will be distributed to the processes after this if nest using MPI_Scatter().
@@ -241,36 +251,65 @@ int main(int argc, char **argv) {
         im_YSZ = imageChannel->height;
         local_XSZ = imageChannel->width;
 
-    }
 
-    MPI_Bcast(&im_YSZ, 1, MPI_INT, 0, comm);
-    MPI_Bcast(&local_XSZ, 1, MPI_INT, 0, comm);
+        kernelDim = 3;
+        kernelRadi = kernelDim/2;
 
-    int* data_counts = malloc(sizeof(int) * comm_sz);
-    int* displs = malloc(sizeof(int) * comm_sz);
+        // We will now adjust data_counts and displs such that the image that is "stitched"
+        // together by MPI_Gatherv() is in the dimensions of the original. And it must be
+        // the correct block of data too!
+        recv_counts = malloc(sizeof(int) * comm_sz);
+        recv_displs = malloc(sizeof(int) * comm_sz);
+        send_counts = malloc(sizeof(int) * comm_sz);
+        send_displs = malloc(sizeof(int) * comm_sz);
 
+        int recv_sum = 0;
+        int send_sum = 0;
+        for (int i = 0; i < comm_sz; i++) {
+            recv_counts[i] = (im_YSZ / comm_sz)  * local_XSZ;
 
-    for (int i = 0; i < comm_sz; i++) {
-        data_counts[i] = (im_YSZ / comm_sz)  * local_XSZ;
-        displs[i] = data_counts[i] * i;
+            // For each i in comm_sz, recv_displs is shifted by (2 * kernelradius * width).
+            recv_displs[i] = recv_sum;
 
-        // Last rank gets the remainder rows if they don't divide evenly.
-        if (i == comm_sz - 1) {
-            data_counts[i] += (im_YSZ % comm_sz) * local_XSZ;
-            displs[i] += data_counts[i] - data_counts[0];
+            // Every value in send_displs is shifted by (- kernelradius * width).
+            send_displs[i] = send_sum;
+
+            // First rank gets the remainder rows if they don't divide evenly.
+            if (i == 0) {
+                recv_counts[i] += (im_YSZ % comm_sz) * local_XSZ;
+
+                send_sum -= kernelRadi * local_XSZ;
+            }
+
+            recv_sum += recv_counts[i] + 2 * kernelRadi * local_XSZ;
+            send_sum += recv_counts[i];
+
+            // Add additional rows beyond the local rectangle based on kernel radius.
+            // Here we also take the top and bottom part of the image into consideration,
+            // since they are the "real" edges of the image.
+            if (i == 0 || i == comm_sz - 1) {
+                send_counts[i] = recv_counts[i] + kernelRadi * local_XSZ;
+            }
+            else {
+                send_counts[i] = recv_counts[i] + 2 * kernelRadi * local_XSZ;
+            }
+            // Send data_count the respective processes, so that the info
+            // about the size of data and resolution is readily at hand.
+            MPI_Send(&send_counts[i], 1, MPI_INT, i, 0, comm);
         }
     }
 
-    int local_YSZ = data_counts[my_rank] / local_XSZ;
-    int local_n = data_counts[my_rank];
+    MPI_Recv(&local_n, 1, MPI_INT, 0, 0, comm, MPI_STATUS_IGNORE);
+    MPI_Bcast(&local_XSZ, 1, MPI_INT, 0, comm);
 
+    int local_YSZ = local_n / local_XSZ;
 
     bmpImageChannel* local_imChannel = newBmpImageChannel(local_XSZ, local_YSZ);
     bmpImageChannel* local_procImChannel = newBmpImageChannel(local_XSZ, local_YSZ);
 
     MPI_Scatterv(imageChannel->rawdata,
-            data_counts,
-            displs,
+            send_counts,
+            send_displs,
             MPI_UNSIGNED_CHAR,
             local_imChannel->rawdata,
             local_n,
@@ -290,14 +329,16 @@ int main(int argc, char **argv) {
                     local_imChannel->data,
                     local_XSZ,
                     local_YSZ,
-//                    (int *)laplacian1Kernel, 3, laplacian1KernelFactor
+                    (int *)laplacian1Kernel, 3, laplacian1KernelFactor
 //                    (int *)laplacian2Kernel, 3, laplacian2KernelFactor
 //                    (int *)laplacian3Kernel, 3, laplacian3KernelFactor
-                    (int *)gaussianKernel, 5, gaussianKernelFactor
+//                    (int *)gaussianKernel, 5, gaussianKernelFactor
         );
         swapImageChannel(&local_procImChannel, &local_imChannel);
     }
     printf("... And I'm done! - Proc%d\n", my_rank);
+
+    // ################################################################ //
 
     freeBmpImageChannel(local_procImChannel);
 
@@ -307,8 +348,8 @@ int main(int argc, char **argv) {
                local_n,
                MPI_UNSIGNED_CHAR,
                imageChannel->rawdata,
-               data_counts,
-               displs,
+               recv_counts,
+               recv_displs,
                MPI_UNSIGNED_CHAR,
                0,
                comm
@@ -317,6 +358,12 @@ int main(int argc, char **argv) {
     freeBmpImageChannel(local_imChannel);
 
     if (my_rank == 0) {
+        // Free the arrays used in MPI_Scatterv, Gatherv.
+        free(recv_counts);
+        free(recv_displs);
+        free(send_counts);
+        free(send_displs);
+
         for (unsigned int i = 0; i < imageChannel->height; i++) {
             imageChannel->data[i] = &(imageChannel->rawdata[i * imageChannel->width]);
         }
@@ -339,7 +386,7 @@ int main(int argc, char **argv) {
         };
 
         finish = MPI_Wtime();
-        printf("Ellapsed time: %e s\n", finish - start);
+        //printf("Ellapsed time: %e s\n", finish - start);
     }
 
     // Shut down MPI
