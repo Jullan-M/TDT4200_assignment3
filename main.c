@@ -25,7 +25,6 @@ float const sobelXKernelFactor = (float) 1.0;
 int const laplacian1Kernel[] = {  -1,  -4,  -1,
                                  -4,  20,  -4,
                                  -1,  -4,  -1};
-
 float const laplacian1KernelFactor = (float) 1.0;
 
 int const laplacian2Kernel[] = { 0,  1,  0,
@@ -46,44 +45,7 @@ int const gaussianKernel[] = { 1,  4,  6,  4, 1,
                                6, 24, 36, 24, 6,
                                4, 16, 24, 16, 4,
                                1,  4,  6,  4, 1 };
-
 float const gaussianKernelFactor = (float) 1.0 / 256.0;
-
-int const NW[] =    {   0,
-                    0,      1,
-                        1};
-
-int const NE[] =    {   0,
-                    1,      0,
-                        1};
-
-int const SW[] =    {   1,
-                    0,      1,
-                        0};
-
-int const SE[] =    {   1,
-                    1,      0,
-                        0};
-
-int const N[] =     {   0   ,
-                    1,      1,
-                        1};
-
-int const E[] =     {   1   ,
-                    1,      0,
-                        1};
-
-int const S[] =     {   1   ,
-                    1,      1,
-                        0};
-
-int const W[] =     {   1   ,
-                    0,      1,
-                        1};
-
-int const C[] =     {   1   ,
-                    1,      1,
-                        1};
 
 // Helper function to swap bmpImageChannel pointers
 void swapImageChannel(bmpImageChannel **one, bmpImageChannel **two) {
@@ -190,11 +152,12 @@ int main(int argc, char **argv) {
 
 
     /*
-      End of Parameter parsing!
+     * End of Parameter parsing!
      */
 
-    double start, finish;
-    start = MPI_Wtime();
+    /*
+     * ---Edited code under this line---
+     */
 
     int comm_sz, my_rank;
     MPI_Init(NULL, NULL);
@@ -204,14 +167,15 @@ int main(int argc, char **argv) {
 
     bmpImage *image;
     bmpImageChannel *imageChannel;
-    int *send_counts, *recv_counts,  *recv_displs, *send_displs;
-    int local_XSZ, local_n, im_YSZ, local_displs, recv_n;
 
-    int kernelDim;
+    int *send_counts, *recv_counts,  *recv_displs, *send_displs;
+    int im_XSZ, im_YSZ;
+
+    int kernelDim = 3;
     int kernelRadi;
 
     // The image will only be opened in root rank.
-    // It will be distributed to the processes after this if nest using MPI_Scatter().
+    // It will be distributed to the at the very end of this if-block.
     if (my_rank == 0) {
         /*
         Create the BMP image and load it from disk.
@@ -249,15 +213,10 @@ int main(int argc, char **argv) {
             goto error_exit;
         }
         im_YSZ = imageChannel->height;
-        local_XSZ = imageChannel->width;
+        im_XSZ = imageChannel->width;
 
-
-        kernelDim = 3;
         kernelRadi = kernelDim/2;
 
-        // We will now adjust data_counts and displs such that the image that is "stitched"
-        // together by MPI_Gatherv() is in the dimensions of the original. And it must be
-        // the correct block of data too!
         recv_counts = malloc(sizeof(int) * comm_sz);
         recv_displs = malloc(sizeof(int) * comm_sz);
         send_counts = malloc(sizeof(int) * comm_sz);
@@ -266,42 +225,44 @@ int main(int argc, char **argv) {
         int send_sum = 0;
 
         for (int i = 0; i < comm_sz; i++) {
-            recv_counts[i] = (im_YSZ / comm_sz)  * local_XSZ;
+            recv_counts[i] = (im_YSZ / comm_sz)  * im_XSZ;
 
-            recv_displs[i] = kernelRadi * local_XSZ;
-
-            // Every value in send_displs is shifted by (- kernelradius * width).
+            // Every processed local image data is shifted by (+ kernelradius * width)
+            // before it they are sent to root process.
+            recv_displs[i] = kernelRadi * im_XSZ;
             send_displs[i] = send_sum;
 
             // First rank gets the remainder rows if they don't divide evenly.
             if (i == 0) {
-                recv_counts[i] += (im_YSZ % comm_sz) * local_XSZ;
+                recv_counts[i] += (im_YSZ % comm_sz) * im_XSZ;
 
-                send_sum -= kernelRadi * local_XSZ;
+                // The local image data that will be processed is shifted by (- kernelradius * width).
+                send_sum -= kernelRadi * im_XSZ;
                 recv_displs[i] = 0;
             }
 
             send_sum += recv_counts[i];
 
-            // Add additional rows beyond the local rectangle based on kernel radius.
+            // Add additional rows beyond the local image, based on kernel radius.
             // Here we also take the top and bottom part of the image into consideration,
             // since they are the "real" edges of the image.
             if (i == 0 || i == comm_sz - 1) {
-                send_counts[i] = recv_counts[i] + kernelRadi * local_XSZ;
+                send_counts[i] = recv_counts[i] + kernelRadi * im_XSZ;
             }
             else {
-                send_counts[i] = recv_counts[i] + 2 * kernelRadi * local_XSZ;
+                send_counts[i] = recv_counts[i] + 2 * kernelRadi * im_XSZ;
             }
 
-            printf("%d SEND\t counts:\t%d \tdisps:%d\n", i, send_counts[i]/local_XSZ, send_displs[i]/local_XSZ);
-            printf("%d RECV\t counts:\t%d \tdisps:%d\n", i, recv_counts[i]/local_XSZ, recv_displs[i]/local_XSZ);
-            // Send data_count the respective processes, so that the info
-            // about the size of data and resolution is readily at hand.
+            printf("%d SEND\t counts:\t%d \tdisps:%d\n", i, send_counts[i]/im_XSZ, send_displs[i]/im_XSZ);
+            printf("%d RECV\t counts:\t%d \tdisps:%d\n", i, recv_counts[i]/im_XSZ, recv_displs[i]/im_XSZ);
+
+            // Send data to the respective processes, so that the relevant info to be used
+            // in processing and sending the local image is readily at hand.
             MPI_Send(&recv_counts[i], 1, MPI_INT, i, 0, comm);
             MPI_Send(&recv_displs[i], 1, MPI_INT, i, 1, comm);
             MPI_Send(&send_counts[i], 1, MPI_INT, i, 2, comm);
 
-
+            // Distribute the actual image data to the processes.
             int tag = 0;
             for (int k = send_displs[i]; k < send_displs[i] + send_counts[i]; k++) {
                 MPI_Send(&imageChannel->rawdata[k], 1, MPI_UNSIGNED_CHAR, i, tag, comm);
@@ -310,23 +271,27 @@ int main(int argc, char **argv) {
         }
     }
 
-    MPI_Bcast(&local_XSZ, 1, MPI_INT, 0, comm);
+    MPI_Bcast(&im_XSZ, 1, MPI_INT, 0, comm);
+    MPI_Bcast(&im_YSZ, 1, MPI_INT, 0, comm);
+
+    // Only to be used locally in each process.
+    int local_n, local_displs, recv_n;
     MPI_Recv(&recv_n, 1, MPI_INT, 0, 0, comm, MPI_STATUS_IGNORE);
     MPI_Recv(&local_displs, 1, MPI_INT, 0, 1, comm, MPI_STATUS_IGNORE);
     MPI_Recv(&local_n, 1, MPI_INT, 0, 2, comm, MPI_STATUS_IGNORE);
-    int local_YSZ = local_n / local_XSZ;
+    int local_YSZ = local_n / im_XSZ;
 
-    bmpImageChannel* local_imChannel = newBmpImageChannel(local_XSZ, local_YSZ);
-    bmpImageChannel* local_procImChannel = newBmpImageChannel(local_XSZ, local_YSZ);
+    bmpImageChannel* local_imChannel = newBmpImageChannel(im_XSZ, local_YSZ);
+    bmpImageChannel* local_procImChannel = newBmpImageChannel(im_XSZ, local_YSZ);
 
+    // Receive the image data distributed by root proc.
     int tag = 0;
     for (int y = 0; y < local_YSZ; y++) {
-        for (int x = 0; x < local_XSZ; x++) {
+        for (int x = 0; x < im_XSZ; x++) {
             MPI_Recv(&local_imChannel->data[y][x], local_n, MPI_UNSIGNED_CHAR, 0, tag, comm, MPI_STATUS_IGNORE);
             tag++;
         }
     }
-
     local_imChannel->rawdata = &(local_imChannel->data[0][0]);
 
     //Here we do the actual computation!
@@ -334,20 +299,20 @@ int main(int argc, char **argv) {
     for (unsigned int i = 0; i < iterations; i ++) {
         applyKernel(local_procImChannel->data,
                     local_imChannel->data,
-                    local_XSZ,
+                    im_XSZ,
                     local_YSZ,
-                    (int *)laplacian1Kernel, 3, laplacian1KernelFactor
+                    (int *)laplacian1Kernel, kernelDim, laplacian1KernelFactor
 //                    (int *)laplacian2Kernel, 3, laplacian2KernelFactor
 //                    (int *)laplacian3Kernel, 3, laplacian3KernelFactor
 //                    (int *)gaussianKernel, 5, gaussianKernelFactor
         );
         swapImageChannel(&local_procImChannel, &local_imChannel);
     }
-    printf("... And I'm done! - Proc%d\n", my_rank);
+    printf("Proc %d: ... And I'm done!\n", my_rank);
 
-    // ################################################################ //
     freeBmpImageChannel(local_procImChannel);
 
+    // Each process sends their own part of the processed image to the root proc.
     tag = 0;
     for (int k = local_displs; k < local_displs + recv_n; k++) {
         MPI_Send(&local_imChannel->rawdata[k], 1, MPI_UNSIGNED_CHAR, 0, tag, comm);
@@ -356,21 +321,18 @@ int main(int argc, char **argv) {
 
 
     if (my_rank == 0) {
+        // The root proc. receives it here.
         int sum = 0;
         for (int rank = 0; rank < comm_sz; rank++) {
             int tag = 0;
-            for (int y = sum; y < sum + recv_counts[rank] / local_XSZ; y++) {
-                for (int x = 0; x < local_XSZ; x++) {
+            for (int y = sum; y < sum + recv_counts[rank] / im_XSZ; y++) {
+                for (int x = 0; x < im_XSZ; x++) {
                     MPI_Recv(&imageChannel->data[y][x], 1, MPI_UNSIGNED_CHAR, rank, tag, comm, MPI_STATUS_IGNORE);
                     tag++;
                 }
             }
-            sum += recv_counts[rank]/local_XSZ;
+            sum += recv_counts[rank]/im_XSZ;
         }
-
-
-
-
         freeBmpImageChannel(local_imChannel);
 
         // Free arrays
@@ -378,6 +340,14 @@ int main(int argc, char **argv) {
         free(recv_displs);
         free(send_counts);
         free(send_displs);
+
+        /*
+        * ---Edited code over this line---
+        */
+
+        /*
+        * ---The code below this line has mostly remained the same---
+        */
 
         for (unsigned int i = 0; i < imageChannel->height; i++) {
             imageChannel->data[i] = &(imageChannel->rawdata[i * imageChannel->width]);
@@ -399,13 +369,11 @@ int main(int argc, char **argv) {
             freeBmpImage(image);
             goto error_exit;
         };
-
-        finish = MPI_Wtime();
-        //printf("Ellapsed time: %e s\n", finish - start);
     }
 
     // Shut down MPI
     MPI_Finalize();
+
     graceful_exit:
     ret = 0;
     error_exit:
