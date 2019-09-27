@@ -265,6 +265,7 @@ int main(int argc, char **argv) {
 
         int recv_sum = 0;
         int send_sum = 0;
+
         for (int i = 0; i < comm_sz; i++) {
             recv_counts[i] = (im_YSZ / comm_sz)  * local_XSZ;
 
@@ -281,7 +282,6 @@ int main(int argc, char **argv) {
                 send_sum -= kernelRadi * local_XSZ;
             }
 
-            recv_sum += recv_counts[i] + 2 * kernelRadi * local_XSZ;
             send_sum += recv_counts[i];
 
             // Add additional rows beyond the local rectangle based on kernel radius.
@@ -293,19 +293,25 @@ int main(int argc, char **argv) {
             else {
                 send_counts[i] = recv_counts[i] + 2 * kernelRadi * local_XSZ;
             }
+
+            recv_sum += send_counts[i] + kernelRadi * local_XSZ;
+
+            printf("%d SEND\t counts:\t%d \tdisps:%d\n", i, send_counts[i]/local_XSZ, send_displs[i]/local_XSZ);
+            printf("%d RECV\t counts:\t%d \tdisps:%d\n", i, recv_counts[i]/local_XSZ, recv_displs[i]/local_XSZ);
             // Send data_count the respective processes, so that the info
             // about the size of data and resolution is readily at hand.
             MPI_Send(&send_counts[i], 1, MPI_INT, i, 0, comm);
         }
     }
 
-    MPI_Recv(&local_n, 1, MPI_INT, 0, 0, comm, MPI_STATUS_IGNORE);
     MPI_Bcast(&local_XSZ, 1, MPI_INT, 0, comm);
+    MPI_Recv(&local_n, 1, MPI_INT, 0, 0, comm, MPI_STATUS_IGNORE);
 
     int local_YSZ = local_n / local_XSZ;
 
     bmpImageChannel* local_imChannel = newBmpImageChannel(local_XSZ, local_YSZ);
     bmpImageChannel* local_procImChannel = newBmpImageChannel(local_XSZ, local_YSZ);
+
 
     MPI_Scatterv(imageChannel->rawdata,
             send_counts,
