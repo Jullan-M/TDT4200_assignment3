@@ -205,7 +205,7 @@ int main(int argc, char **argv) {
     bmpImage *image;
     bmpImageChannel *imageChannel;
     int *send_counts, *recv_counts,  *recv_displs, *send_displs;
-    int local_XSZ, local_n, im_YSZ;
+    int local_XSZ, local_n, im_YSZ, local_displs, recv_n;
 
     int kernelDim;
     int kernelRadi;
@@ -263,14 +263,12 @@ int main(int argc, char **argv) {
         send_counts = malloc(sizeof(int) * comm_sz);
         send_displs = malloc(sizeof(int) * comm_sz);
 
-        int recv_sum = 0;
         int send_sum = 0;
 
         for (int i = 0; i < comm_sz; i++) {
             recv_counts[i] = (im_YSZ / comm_sz)  * local_XSZ;
 
-            // For each i in comm_sz, recv_displs is shifted by (2 * kernelradius * width).
-            recv_displs[i] = recv_sum;
+            recv_displs[i] = kernelRadi * local_XSZ;
 
             // Every value in send_displs is shifted by (- kernelradius * width).
             send_displs[i] = send_sum;
@@ -280,6 +278,7 @@ int main(int argc, char **argv) {
                 recv_counts[i] += (im_YSZ % comm_sz) * local_XSZ;
 
                 send_sum -= kernelRadi * local_XSZ;
+                recv_displs[i] = 0;
             }
 
             send_sum += recv_counts[i];
@@ -294,13 +293,14 @@ int main(int argc, char **argv) {
                 send_counts[i] = recv_counts[i] + 2 * kernelRadi * local_XSZ;
             }
 
-            recv_sum += send_counts[i] + kernelRadi * local_XSZ;
-
             printf("%d SEND\t counts:\t%d \tdisps:%d\n", i, send_counts[i]/local_XSZ, send_displs[i]/local_XSZ);
             printf("%d RECV\t counts:\t%d \tdisps:%d\n", i, recv_counts[i]/local_XSZ, recv_displs[i]/local_XSZ);
             // Send data_count the respective processes, so that the info
             // about the size of data and resolution is readily at hand.
-            MPI_Send(&send_counts[i], 1, MPI_INT, i, 0, comm);
+            MPI_Send(&recv_counts[i], 1, MPI_INT, i, 0, comm);
+            MPI_Send(&recv_displs[i], 1, MPI_INT, i, 1, comm);
+            MPI_Send(&send_counts[i], 1, MPI_INT, i, 2, comm);
+
 
             int tag = 0;
             for (int k = send_displs[i]; k < send_displs[i] + send_counts[i]; k++) {
@@ -311,7 +311,9 @@ int main(int argc, char **argv) {
     }
 
     MPI_Bcast(&local_XSZ, 1, MPI_INT, 0, comm);
-    MPI_Recv(&local_n, 1, MPI_INT, 0, 0, comm, MPI_STATUS_IGNORE);
+    MPI_Recv(&recv_n, 1, MPI_INT, 0, 0, comm, MPI_STATUS_IGNORE);
+    MPI_Recv(&local_displs, 1, MPI_INT, 0, 1, comm, MPI_STATUS_IGNORE);
+    MPI_Recv(&local_n, 1, MPI_INT, 0, 2, comm, MPI_STATUS_IGNORE);
     int local_YSZ = local_n / local_XSZ;
 
     bmpImageChannel* local_imChannel = newBmpImageChannel(local_XSZ, local_YSZ);
@@ -344,24 +346,34 @@ int main(int argc, char **argv) {
     printf("... And I'm done! - Proc%d\n", my_rank);
 
     // ################################################################ //
-
     freeBmpImageChannel(local_procImChannel);
 
-    MPI_Gatherv(local_imChannel->rawdata,
-               local_n,
-               MPI_UNSIGNED_CHAR,
-               imageChannel->rawdata,
-               recv_counts,
-               recv_displs,
-               MPI_UNSIGNED_CHAR,
-               0,
-               comm
-    );
+    tag = 0;
+    for (int k = local_displs; k < local_displs + recv_n; k++) {
+        MPI_Send(&local_imChannel->rawdata[k], 1, MPI_UNSIGNED_CHAR, 0, tag, comm);
+        tag++;
+    }
 
-    freeBmpImageChannel(local_imChannel);
 
     if (my_rank == 0) {
-        // Free the arrays used in MPI_Scatterv, Gatherv.
+        int sum = 0;
+        for (int rank = 0; rank < comm_sz; rank++) {
+            int tag = 0;
+            for (int y = sum; y < sum + recv_counts[rank] / local_XSZ; y++) {
+                for (int x = 0; x < local_XSZ; x++) {
+                    MPI_Recv(&imageChannel->data[y][x], 1, MPI_UNSIGNED_CHAR, rank, tag, comm, MPI_STATUS_IGNORE);
+                    tag++;
+                }
+            }
+            sum += recv_counts[rank]/local_XSZ;
+        }
+
+
+
+
+        freeBmpImageChannel(local_imChannel);
+
+        // Free arrays
         free(recv_counts);
         free(recv_displs);
         free(send_counts);
