@@ -301,32 +301,31 @@ int main(int argc, char **argv) {
             // Send data_count the respective processes, so that the info
             // about the size of data and resolution is readily at hand.
             MPI_Send(&send_counts[i], 1, MPI_INT, i, 0, comm);
+
+            int tag = 0;
+            for (int k = send_displs[i]; k < send_displs[i] + send_counts[i]; k++) {
+                MPI_Send(&imageChannel->rawdata[k], 1, MPI_UNSIGNED_CHAR, i, tag, comm);
+                tag++;
+            }
         }
     }
 
     MPI_Bcast(&local_XSZ, 1, MPI_INT, 0, comm);
     MPI_Recv(&local_n, 1, MPI_INT, 0, 0, comm, MPI_STATUS_IGNORE);
-
     int local_YSZ = local_n / local_XSZ;
 
     bmpImageChannel* local_imChannel = newBmpImageChannel(local_XSZ, local_YSZ);
     bmpImageChannel* local_procImChannel = newBmpImageChannel(local_XSZ, local_YSZ);
 
-
-    MPI_Scatterv(imageChannel->rawdata,
-            send_counts,
-            send_displs,
-            MPI_UNSIGNED_CHAR,
-            local_imChannel->rawdata,
-            local_n,
-            MPI_UNSIGNED_CHAR,
-            0,
-            comm
-    );
-
-    for (unsigned int i = 0; i < local_YSZ; i++) {
-        local_imChannel->data[i] = &(local_imChannel->rawdata[i * local_XSZ]);
+    int tag = 0;
+    for (int y = 0; y < local_YSZ; y++) {
+        for (int x = 0; x < local_XSZ; x++) {
+            MPI_Recv(&local_imChannel->data[y][x], local_n, MPI_UNSIGNED_CHAR, 0, tag, comm, MPI_STATUS_IGNORE);
+            tag++;
+        }
     }
+
+    local_imChannel->rawdata = &(local_imChannel->data[0][0]);
 
     //Here we do the actual computation!
     printf("Proc %d: Here I go...\n", my_rank);
@@ -347,8 +346,6 @@ int main(int argc, char **argv) {
     // ################################################################ //
 
     freeBmpImageChannel(local_procImChannel);
-
-    local_imChannel->rawdata = &(local_imChannel->data[0][0]);
 
     MPI_Gatherv(local_imChannel->rawdata,
                local_n,
