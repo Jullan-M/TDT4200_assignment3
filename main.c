@@ -223,6 +223,7 @@ int main(int argc, char **argv) {
         send_displs = malloc(sizeof(int) * comm_sz);
 
         int send_sum = 0;
+        int recv_sum = 0;
 
         for (int i = 0; i < comm_sz; i++) {
             recv_counts[i] = (im_YSZ / comm_sz)  * im_XSZ;
@@ -264,10 +265,12 @@ int main(int argc, char **argv) {
 
             // Distribute the actual image data to the processes.
             int tag = 0;
-            for (int k = send_displs[i]; k < send_displs[i] + send_counts[i]; k++) {
+            for (int k = recv_sum; k < recv_sum + recv_counts[i]; k++) {
                 MPI_Send(&imageChannel->rawdata[k], 1, MPI_UNSIGNED_CHAR, i, tag, comm);
                 tag++;
             }
+
+            recv_sum += recv_counts[i];
         }
     }
 
@@ -286,13 +289,22 @@ int main(int argc, char **argv) {
 
     // Receive the image data distributed by root proc.
     int tag = 0;
-    for (int y = 0; y < local_YSZ; y++) {
+    int ydisp = local_displs / im_XSZ;
+    int yrecv = recv_n / im_XSZ;
+    printf("yrecv: %d,\tlocal_YSZ:%d\n", yrecv, local_YSZ);
+    for (int y = ydisp; y < ydisp + yrecv; y++) {
         for (int x = 0; x < im_XSZ; x++) {
             MPI_Recv(&local_imChannel->data[y][x], local_n, MPI_UNSIGNED_CHAR, 0, tag, comm, MPI_STATUS_IGNORE);
             tag++;
         }
     }
     local_imChannel->rawdata = &(local_imChannel->data[0][0]);
+
+    if (my_rank == 0) {
+        for (int x = 0; x < im_XSZ; x++) {
+            MPI_Send(&local_imChannel->data[local_YSZ - 1][], 1, MPI_UNSIGNED_CHAR, i, tag, comm);
+        }
+    }
 
     //Here we do the actual computation!
     printf("Proc %d: Here I go...\n", my_rank);
