@@ -100,6 +100,76 @@ void help(char const *exec, char const opt, char const *optarg) {
     fprintf(out, "Example: %s in.bmp out.bmp -i 10000\n", exec);
 }
 
+void sendToAdjacentRank(bmpImageChannel* in, int my_rank, int kernelRad, int comm_sz, MPI_Comm comm) {
+    int tag = 0;
+    if (my_rank == 0) {
+        for (int k = in->height - kernelRad * 2; k < in->height - kernelRad; k++) {
+            for (int x = 0; x < in->width; x++) {
+                MPI_Send(&in->data[k][x], 1, MPI_UNSIGNED_CHAR, my_rank + 1, tag, comm);
+                tag++;
+            }
+        }
+    }
+    else if (my_rank == comm_sz - 1) {
+        for (int k = kernelRad; k < kernelRad * 2; k++) {
+            for (int x = 0; x < in->width; x++) {
+                MPI_Send(&in->data[k][x], 1, MPI_UNSIGNED_CHAR, my_rank - 1, tag, comm);
+                tag++;
+            }
+        }
+    }
+    else {
+        for (int k = kernelRad; k < kernelRad * 2; k++) {
+            for (int x = 0; x < in->width; x++) {
+                MPI_Send(&in->data[k][x], 1, MPI_UNSIGNED_CHAR, my_rank - 1, tag, comm);
+                tag++;
+            }
+        }
+        tag = 0;
+        for (int k = in->height - kernelRad * 2; k < in->height - kernelRad; k++) {
+            for (int x = 0; x < in->width; x++) {
+                MPI_Send(&in->data[k][x], 1, MPI_UNSIGNED_CHAR, my_rank + 1, tag, comm);
+                tag++;
+            }
+        }
+    }
+}
+
+void recvFromAdjacentRank(bmpImageChannel* in, int my_rank, int kernelRad, int comm_sz, MPI_Comm comm){
+    int tag = 0;
+    if (my_rank == 0) {
+        for (int k = in->height - kernelRad; k < in->height; k++) {
+            for (int x = 0; x < in->width; x++) {
+                MPI_Recv(&in->data[k][x], 1, MPI_UNSIGNED_CHAR, my_rank + 1, tag, comm, MPI_STATUS_IGNORE);
+                tag++;
+            }
+        }
+    }
+    else if (my_rank == comm_sz - 1) {
+        for (int k = 0; k < kernelRad; k++) {
+            for (int x = 0; x < in->width; x++) {
+                MPI_Recv(&in->data[k][x], 1, MPI_UNSIGNED_CHAR, my_rank - 1, tag, comm, MPI_STATUS_IGNORE);
+                tag++;
+            }
+        }
+    }
+    else {
+        for (int k = 0; k < kernelRad; k++) {
+            for (int x = 0; x < in->width; x++) {
+                MPI_Recv(&in->data[k][x], 1, MPI_UNSIGNED_CHAR, my_rank - 1, tag, comm, MPI_STATUS_IGNORE);
+                tag++;
+            }
+        }
+        tag = 0;
+        for (int k = in->height - kernelRad; k < in->height; k++) {
+            for (int x = 0; x < in->width; x++) {
+                MPI_Recv(&in->data[k][x], 1, MPI_UNSIGNED_CHAR, my_rank + 1, tag, comm, MPI_STATUS_IGNORE);
+                tag++;
+            }
+        }
+    }
+}
+
 int main(int argc, char **argv) {
     /*
     Parameter parsing, don't change this!
@@ -238,11 +308,9 @@ int main(int argc, char **argv) {
                 recv_counts[i] += (im_YSZ % comm_sz) * im_XSZ;
 
                 // The local image data that will be processed is shifted by (- kernelradius * width).
-                send_sum -= kernelRadi * im_XSZ;
+                send_sum += kernelRadi * im_XSZ;
                 recv_displs[i] = 0;
             }
-
-            send_sum += recv_counts[i];
 
             // Add additional rows beyond the local image, based on kernel radius.
             // Here we also take the top and bottom part of the image into consideration,
@@ -253,6 +321,8 @@ int main(int argc, char **argv) {
             else {
                 send_counts[i] = recv_counts[i] + 2 * kernelRadi * im_XSZ;
             }
+
+            send_sum += send_counts[i];
 
             printf("%d SEND\t counts:\t%d \tdisps:%d\n", i, send_counts[i]/im_XSZ, send_displs[i]/im_XSZ);
             printf("%d RECV\t counts:\t%d \tdisps:%d\n", i, recv_counts[i]/im_XSZ, recv_displs[i]/im_XSZ);
@@ -269,7 +339,6 @@ int main(int argc, char **argv) {
                 MPI_Send(&imageChannel->rawdata[k], 1, MPI_UNSIGNED_CHAR, i, tag, comm);
                 tag++;
             }
-
             recv_sum += recv_counts[i];
         }
     }
@@ -300,11 +369,9 @@ int main(int argc, char **argv) {
     }
     local_imChannel->rawdata = &(local_imChannel->data[0][0]);
 
-    if (my_rank == 0) {
-        for (int x = 0; x < im_XSZ; x++) {
-            MPI_Send(&local_imChannel->data[local_YSZ - 1][], 1, MPI_UNSIGNED_CHAR, i, tag, comm);
-        }
-    }
+    // Send and receive data beyond the images own borders from adjacent ranks.
+    sendToAdjacentRank(local_imChannel, my_rank, kernelRadi, comm_sz, comm);
+    recvFromAdjacentRank(local_imChannel, my_rank, kernelRadi, comm_sz, comm);
 
     //Here we do the actual computation!
     printf("Proc %d: Here I go...\n", my_rank);
@@ -345,7 +412,6 @@ int main(int argc, char **argv) {
             }
             sum += recv_counts[rank]/im_XSZ;
         }
-        freeBmpImageChannel(local_imChannel);
 
         // Free arrays
         free(recv_counts);
@@ -382,6 +448,8 @@ int main(int argc, char **argv) {
             goto error_exit;
         };
     }
+
+    freeBmpImageChannel(local_imChannel);
 
     // Shut down MPI
     MPI_Finalize();
