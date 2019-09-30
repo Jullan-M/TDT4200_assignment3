@@ -326,11 +326,6 @@ int main(int argc, char **argv) {
         tag++;
     }
 
-//    double start, stop;
-//    if (my_rank == 0) {
-//        start = MPI_Wtime();
-//    }
-
     // Here we do the actual computation!
     for (unsigned int i = 0; i < iterations; i ++) {
         // Send and receive data beyond the local images own borders from adjacent ranks.
@@ -348,11 +343,6 @@ int main(int argc, char **argv) {
         );
         swapImageChannel(&local_procImChannel, &local_imChannel);
     }
-
-//    if (my_rank == 0) {
-//        stop = MPI_Wtime();
-//        printf("Time: %e", stop - start);
-//    }
 
     freeBmpImageChannel(local_procImChannel);
 
