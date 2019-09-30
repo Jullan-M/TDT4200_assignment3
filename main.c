@@ -100,69 +100,41 @@ void help(char const *exec, char const opt, char const *optarg) {
     fprintf(out, "Example: %s in.bmp out.bmp -i 10000\n", exec);
 }
 
-void sendToAdjacentRank(bmpImageChannel* in, int my_rank, int kernelRad, int comm_sz, MPI_Comm comm) {
+void sendrecvAdjacentRanks(bmpImageChannel* in, int my_rank, int kRad, int comm_sz, MPI_Comm comm){
     int tag = 0;
+    // First rank only sends its uppermost rows. # of rows exchanged is determined by kernel size.
     if (my_rank == 0) {
-        for (int k = in->height - kernelRad * 2; k < in->height - kernelRad; k++) {
+        for (int k = in->height - kRad; k < in->height; k++) {
             for (int x = 0; x < in->width; x++) {
-                MPI_Send(&in->data[k][x], 1, MPI_UNSIGNED_CHAR, my_rank + 1, tag, comm);
-                tag++;
-            }
-        }
-    }
-    else if (my_rank == comm_sz - 1) {
-        for (int k = kernelRad; k < kernelRad * 2; k++) {
-            for (int x = 0; x < in->width; x++) {
-                MPI_Send(&in->data[k][x], 1, MPI_UNSIGNED_CHAR, my_rank - 1, tag, comm);
-                tag++;
-            }
-        }
-    }
-    else {
-        for (int k = kernelRad; k < kernelRad * 2; k++) {
-            for (int x = 0; x < in->width; x++) {
-                MPI_Send(&in->data[k][x], 1, MPI_UNSIGNED_CHAR, my_rank - 1, tag, comm);
-                tag++;
-            }
-        }
-        tag = 0;
-        for (int k = in->height - kernelRad * 2; k < in->height - kernelRad; k++) {
-            for (int x = 0; x < in->width; x++) {
-                MPI_Send(&in->data[k][x], 1, MPI_UNSIGNED_CHAR, my_rank + 1, tag, comm);
-                tag++;
-            }
-        }
-    }
-}
-
-void recvFromAdjacentRank(bmpImageChannel* in, int my_rank, int kernelRad, int comm_sz, MPI_Comm comm){
-    int tag = 0;
-    if (my_rank == 0) {
-        for (int k = in->height - kernelRad; k < in->height; k++) {
-            for (int x = 0; x < in->width; x++) {
+                MPI_Send(&in->data[k - kRad][x], 1, MPI_UNSIGNED_CHAR, my_rank + 1, tag, comm);
                 MPI_Recv(&in->data[k][x], 1, MPI_UNSIGNED_CHAR, my_rank + 1, tag, comm, MPI_STATUS_IGNORE);
                 tag++;
             }
         }
     }
+    // Last rank only sends its lowest rows.
     else if (my_rank == comm_sz - 1) {
-        for (int k = 0; k < kernelRad; k++) {
+        for (int k = 0; k < kRad; k++) {
             for (int x = 0; x < in->width; x++) {
+                MPI_Send(&in->data[k + kRad][x], 1, MPI_UNSIGNED_CHAR, my_rank - 1, tag, comm);
                 MPI_Recv(&in->data[k][x], 1, MPI_UNSIGNED_CHAR, my_rank - 1, tag, comm, MPI_STATUS_IGNORE);
                 tag++;
             }
         }
     }
+    // The rest sends both their lower and upper rows.
     else {
-        for (int k = 0; k < kernelRad; k++) {
+        for (int k = 0; k < kRad; k++) {
             for (int x = 0; x < in->width; x++) {
+                MPI_Send(&in->data[k + kRad][x], 1, MPI_UNSIGNED_CHAR, my_rank - 1, tag, comm);
                 MPI_Recv(&in->data[k][x], 1, MPI_UNSIGNED_CHAR, my_rank - 1, tag, comm, MPI_STATUS_IGNORE);
                 tag++;
             }
         }
         tag = 0;
-        for (int k = in->height - kernelRad; k < in->height; k++) {
+        for (int k = in->height - kRad; k < in->height; k++) {
             for (int x = 0; x < in->width; x++) {
+                MPI_Send(&in->data[k - kRad][x], 1, MPI_UNSIGNED_CHAR, my_rank + 1, tag, comm);
                 MPI_Recv(&in->data[k][x], 1, MPI_UNSIGNED_CHAR, my_rank + 1, tag, comm, MPI_STATUS_IGNORE);
                 tag++;
             }
@@ -238,11 +210,11 @@ int main(int argc, char **argv) {
     bmpImage *image;
     bmpImageChannel *imageChannel;
 
-    int *send_counts, *recv_counts,  *recv_displs, *send_displs;
+    int *send_counts, *recv_counts,  *recv_displs;
     int im_XSZ, im_YSZ;
 
     int kernelDim = 3;
-    int kernelRadi;
+    int kernelRadi = kernelDim/2;
 
     // The image will only be opened in root rank.
     // It will be distributed to the at the very end of this if-block.
@@ -285,34 +257,29 @@ int main(int argc, char **argv) {
         im_YSZ = imageChannel->height;
         im_XSZ = imageChannel->width;
 
-        kernelRadi = kernelDim/2;
-
         recv_counts = malloc(sizeof(int) * comm_sz);
         recv_displs = malloc(sizeof(int) * comm_sz);
         send_counts = malloc(sizeof(int) * comm_sz);
-        send_displs = malloc(sizeof(int) * comm_sz);
 
-        int send_sum = 0;
         int recv_sum = 0;
 
         for (int i = 0; i < comm_sz; i++) {
             recv_counts[i] = (im_YSZ / comm_sz)  * im_XSZ;
 
             // Every processed local image data is shifted by (+ kernelradius * width)
-            // before it they are sent to root process.
+            // before they are sent to root process.
             recv_displs[i] = kernelRadi * im_XSZ;
-            send_displs[i] = send_sum;
 
             // First rank gets the remainder rows if they don't divide evenly.
             if (i == 0) {
                 recv_counts[i] += (im_YSZ % comm_sz) * im_XSZ;
 
-                // The local image data that will be processed is shifted by (- kernelradius * width).
-                send_sum += kernelRadi * im_XSZ;
+                // Process 0 data is not shifted at all.
                 recv_displs[i] = 0;
             }
 
-            // Add additional rows beyond the local image, based on kernel radius.
+            // Add additional rows beyond the local image, based on kernel dimension, to be used
+            // in boundary exchange.
             // Here we also take the top and bottom part of the image into consideration,
             // since they are the "real" edges of the image.
             if (i == 0 || i == comm_sz - 1) {
@@ -322,12 +289,7 @@ int main(int argc, char **argv) {
                 send_counts[i] = recv_counts[i] + 2 * kernelRadi * im_XSZ;
             }
 
-            send_sum += send_counts[i];
-
-            printf("%d SEND\t counts:\t%d \tdisps:%d\n", i, send_counts[i]/im_XSZ, send_displs[i]/im_XSZ);
-            printf("%d RECV\t counts:\t%d \tdisps:%d\n", i, recv_counts[i]/im_XSZ, recv_displs[i]/im_XSZ);
-
-            // Send data to the respective processes, so that the relevant info to be used
+            // Send data sizes to the respective processes, so that the relevant info to be used
             // in processing and sending the local image is readily at hand.
             MPI_Send(&recv_counts[i], 1, MPI_INT, i, 0, comm);
             MPI_Send(&recv_displs[i], 1, MPI_INT, i, 1, comm);
@@ -339,6 +301,7 @@ int main(int argc, char **argv) {
                 MPI_Send(&imageChannel->rawdata[k], 1, MPI_UNSIGNED_CHAR, i, tag, comm);
                 tag++;
             }
+
             recv_sum += recv_counts[i];
         }
     }
@@ -346,7 +309,7 @@ int main(int argc, char **argv) {
     MPI_Bcast(&im_XSZ, 1, MPI_INT, 0, comm);
     MPI_Bcast(&im_YSZ, 1, MPI_INT, 0, comm);
 
-    // Only to be used locally in each process.
+    // Variables to be used locally in each process.
     int local_n, local_displs, recv_n;
     MPI_Recv(&recv_n, 1, MPI_INT, 0, 0, comm, MPI_STATUS_IGNORE);
     MPI_Recv(&local_displs, 1, MPI_INT, 0, 1, comm, MPI_STATUS_IGNORE);
@@ -358,24 +321,23 @@ int main(int argc, char **argv) {
 
     // Receive the image data distributed by root proc.
     int tag = 0;
-    int ydisp = local_displs / im_XSZ;
-    int yrecv = recv_n / im_XSZ;
-    printf("yrecv: %d,\tlocal_YSZ:%d\n", yrecv, local_YSZ);
-    for (int y = ydisp; y < ydisp + yrecv; y++) {
-        for (int x = 0; x < im_XSZ; x++) {
-            MPI_Recv(&local_imChannel->data[y][x], local_n, MPI_UNSIGNED_CHAR, 0, tag, comm, MPI_STATUS_IGNORE);
-            tag++;
-        }
+    for (int i = local_displs; i < local_displs + recv_n; i++) {
+        MPI_Recv(&local_imChannel->rawdata[i], 1, MPI_UNSIGNED_CHAR, 0, tag, comm, MPI_STATUS_IGNORE);
+        tag++;
     }
-    local_imChannel->rawdata = &(local_imChannel->data[0][0]);
 
-    // Send and receive data beyond the images own borders from adjacent ranks.
-    sendToAdjacentRank(local_imChannel, my_rank, kernelRadi, comm_sz, comm);
-    recvFromAdjacentRank(local_imChannel, my_rank, kernelRadi, comm_sz, comm);
+//    double start, stop;
+//    if (my_rank == 0) {
+//        start = MPI_Wtime();
+//    }
 
-    //Here we do the actual computation!
+    // Here we do the actual computation!
     printf("Proc %d: Here I go...\n", my_rank);
     for (unsigned int i = 0; i < iterations; i ++) {
+        // Send and receive data beyond the local images own borders from adjacent ranks.
+        // This has to be done every iteration.
+        sendrecvAdjacentRanks(local_imChannel, my_rank, kernelRadi, comm_sz, comm);
+
         applyKernel(local_procImChannel->data,
                     local_imChannel->data,
                     im_XSZ,
@@ -389,6 +351,11 @@ int main(int argc, char **argv) {
     }
     printf("Proc %d: ... And I'm done!\n", my_rank);
 
+//    if (my_rank == 0) {
+//        stop = MPI_Wtime();
+//        printf("Time: %e", stop - start);
+//    }
+
     freeBmpImageChannel(local_procImChannel);
 
     // Each process sends their own part of the processed image to the root proc.
@@ -398,26 +365,24 @@ int main(int argc, char **argv) {
         tag++;
     }
 
+    freeBmpImageChannel(local_imChannel);
 
     if (my_rank == 0) {
-        // The root proc. receives it here.
+        // The root proc. receives the local images here.
         int sum = 0;
         for (int rank = 0; rank < comm_sz; rank++) {
             int tag = 0;
-            for (int y = sum; y < sum + recv_counts[rank] / im_XSZ; y++) {
-                for (int x = 0; x < im_XSZ; x++) {
-                    MPI_Recv(&imageChannel->data[y][x], 1, MPI_UNSIGNED_CHAR, rank, tag, comm, MPI_STATUS_IGNORE);
-                    tag++;
-                }
+            for (int k = sum; k < sum + recv_counts[rank]; k++) {
+                MPI_Recv(&imageChannel->rawdata[k], 1, MPI_UNSIGNED_CHAR, rank, tag, comm, MPI_STATUS_IGNORE);
+                tag++;
             }
-            sum += recv_counts[rank]/im_XSZ;
+            sum += recv_counts[rank];
         }
 
         // Free arrays
         free(recv_counts);
         free(recv_displs);
         free(send_counts);
-        free(send_displs);
 
         /*
         * ---Edited code over this line---
@@ -427,9 +392,6 @@ int main(int argc, char **argv) {
         * ---The code below this line has mostly remained the same---
         */
 
-        for (unsigned int i = 0; i < imageChannel->height; i++) {
-            imageChannel->data[i] = &(imageChannel->rawdata[i * imageChannel->width]);
-        }
         // Map our single color image back to a normal BMP image with 3 color channels
         // mapEqual puts the color value on all three channels the same way
         // other mapping functions are mapRed, mapGreen, mapBlue
@@ -448,8 +410,6 @@ int main(int argc, char **argv) {
             goto error_exit;
         };
     }
-
-    freeBmpImageChannel(local_imChannel);
 
     // Shut down MPI
     MPI_Finalize();
