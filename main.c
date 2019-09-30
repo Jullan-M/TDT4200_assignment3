@@ -332,7 +332,6 @@ int main(int argc, char **argv) {
 //    }
 
     // Here we do the actual computation!
-    printf("Proc %d: Here I go...\n", my_rank);
     for (unsigned int i = 0; i < iterations; i ++) {
         // Send and receive data beyond the local images own borders from adjacent ranks.
         // This has to be done every iteration.
@@ -349,7 +348,6 @@ int main(int argc, char **argv) {
         );
         swapImageChannel(&local_procImChannel, &local_imChannel);
     }
-    printf("Proc %d: ... And I'm done!\n", my_rank);
 
 //    if (my_rank == 0) {
 //        stop = MPI_Wtime();
