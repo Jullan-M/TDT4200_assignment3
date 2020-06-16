@@ -282,11 +282,15 @@ int main(int argc, char **argv) {
             // in boundary exchange.
             // Here we also take the top and bottom part of the image into consideration,
             // since they are the "real" edges of the image.
-            if (i == 0 || i == comm_sz - 1) {
+            if (i != 0 && i != comm_sz - 1) { // Middle part has two edges to share
+                send_counts[i] = recv_counts[i] + 2 * kernelRadi * im_XSZ;
+                
+            }
+            else if (comm_sz != 1) { // Top and bottom have one edge to share
                 send_counts[i] = recv_counts[i] + kernelRadi * im_XSZ;
             }
-            else {
-                send_counts[i] = recv_counts[i] + 2 * kernelRadi * im_XSZ;
+            else { // If there's only one proc, there's nothing to share.
+                send_counts[i] = recv_counts[i];
             }
 
             // Send data sizes to the respective processes, so that the relevant info to be used
@@ -330,7 +334,9 @@ int main(int argc, char **argv) {
     for (unsigned int i = 0; i < iterations; i ++) {
         // Send and receive data beyond the local images own borders from adjacent ranks.
         // This has to be done every iteration.
-        sendrecvAdjacentRanks(local_imChannel, my_rank, kernelRadi, comm_sz, comm);
+        if (comm_sz != 1) {
+            sendrecvAdjacentRanks(local_imChannel, my_rank, kernelRadi, comm_sz, comm);
+        }
 
         applyKernel(local_procImChannel->data,
                     local_imChannel->data,
